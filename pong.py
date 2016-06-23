@@ -91,6 +91,7 @@ logger.info('H:%d,D:%d,batch_size:%d,learning_rate:%f,gamma:%f,decay_rate:%f,res
            H,D,batch_size,learning_rate,gamma,decay_rate,resume,render)
 
 if resume:
+    logger.info("Resuming from a checkpoint")
     model = pickle.load(open('save.p', 'rb'))
 else:
     model = {}
