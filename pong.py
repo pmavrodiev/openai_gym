@@ -5,16 +5,32 @@ import gym
 import logging
 import logging.handlers
 import gzip
+import sys
 
 
 """ AUXILLIARY FUNCTIONS """
+# sigmoid "squashing" function to interval [0,1]
 def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x)) # sigmoid "squashing" function to interval [0,1]
+    with np.errstate(all='raise'):
+        try:
+            rv = 1.0 / (1.0 + np.exp(-x))
+        except FloatingPointError:
+            pickle.dump(model, open('save_err.p', 'wb'))
+            logger.error('sigmoid(x): Floating point error because of %f',x)
+            sys.exit(1)
+    return rv
 
+# this is the derivative of sigmoid
 def dsigmoid(x):
-    """ this is the derivative of sigmoid """
-    ex = np.exp(x)
-    return ex / ((ex + 1.0)**2.0)
+    with np.errstate(over='raise'):
+        try:
+            ex = np.exp(x)
+            rv = ex / ((ex + 1.0)**2.0)
+        except FloatingPointError:
+            pickle.dump(model, open('save_err.p', 'wb'))
+            logger.error('dsigmoid(x): Floating point error because of %f',x)
+            sys.exit(1)
+    return rv
 
 def prepro(I):
     """ prepro 210x160x3 uint8 frame into 6400 (80x80) 1D float vector """
@@ -39,7 +55,9 @@ def policy_backward(eph, epdlogp, epdrho):
     dW2 = np.dot(eph.T, epdlogp*epdrho).ravel()
     dh = np.outer(epdlogp*epdrho, model['W2'])
     dh[eph <= 0] = 0 # backpro prelu. if the neuron was inactive, do not change its weight(?)
-    dW1 = np.dot(dh.T, epx) - alpha*np.sum(model['W1'])
+    dW1 = np.dot(dh.T, epx) - alpha*model['W1']
+    # print("%f\t%f"%(np.sum(model['W1']),np.sum(dW1)))
+    # print(dW1)
     return {'W1':dW1, 'W2':dW2}
 
 def discount_rewards(r):
@@ -184,6 +202,7 @@ while keep_going:
         # perform rmsprop parameter update every batch_size episodes
         if episode_number % batch_size == 0:
             logger.info('Performing param update')
+            print(grad_buffer['W1'])
             for k in ['W1','W2']:
                 g = grad_buffer[k] # gradient
                 rmsprop_cache[k] = decay_rate * rmsprop_cache[k] + (1 - decay_rate) * g**2
@@ -191,11 +210,13 @@ while keep_going:
                 grad_buffer[k] = np.zeros_like(model[k]) # reset batch gradient buffer
 
         # boring book-keeping
+        if episode_number % 1000 == 0:
+            logger.info("Writing model to file, episode %d",episode_number)
+            pickle.dump(model, open('save_'+str(episode_number)+'.p', 'wb'))
+
         running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
         logger.info('Resetting env. episode total/mean reward, up frequency and sum(W1): %f \t %f \t %f \t %f',
                     reward_sum, running_reward,model['frequency_up'],np.sum(model['W1']))
-        if episode_number % 1000 == 0:
-            pickle.dump(model, open('save_'+str(episode_number)+'.p', 'wb'))
         reward_sum = 0
         observation = env.reset() # reset env
         prev_x = None
