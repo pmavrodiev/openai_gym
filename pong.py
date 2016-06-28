@@ -39,7 +39,7 @@ def policy_backward(eph, epdlogp, epdrho):
     dW2 = np.dot(eph.T, epdlogp*epdrho).ravel()
     dh = np.outer(epdlogp*epdrho, model['W2'])
     dh[eph <= 0] = 0 # backpro prelu. if the neuron was inactive, do not change its weight(?)
-    dW1 = np.dot(dh.T, epx)
+    dW1 = np.dot(dh.T, epx) - alpha*np.matrix.sum(model['W1'])
     return {'W1':dW1, 'W2':dW2}
 
 def discount_rewards(r):
@@ -80,6 +80,7 @@ H = int(config['NEURAL_NETWORK']['number_neurons']) # number of hidden layer neu
 batch_size = int(config['NEURAL_NETWORK']['batch_size']) # every how many episodes (games) to do a param update?
 learning_rate = float(config['NEURAL_NETWORK']['learning_rate'])
 gamma = float(config['NEURAL_NETWORK']['gamma']) # discount factor for reward
+alpha = float(config['NEURAL_NETWORK']['alpha']) # L2 regularization
 decay_rate = float(config['NEURAL_NETWORK']['decay_rate']) # decay factor for RMSProp leaky sum of grad^2
 resume = config['NEURAL_NETWORK']['resume'].lower() == 'true' # resume from previous checkpoint?
 render = config['NEURAL_NETWORK']['render'].lower() == 'true'
