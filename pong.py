@@ -192,8 +192,8 @@ while keep_going:
 
         # boring book-keeping
         running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
-        logger.info('Resetting env. episode total/mean reward and up frequency were: %f \t %f \t %f',
-                    reward_sum, running_reward,model['frequency_up'])
+        logger.info('Resetting env. episode total/mean reward, up frequency and sum(W1): %f \t %f \t %f \t %f',
+                    reward_sum, running_reward,model['frequency_up'],np.sum(model['W1']))
         if episode_number % 1000 == 0:
             pickle.dump(model, open('save_'+str(episode_number)+'.p', 'wb'))
         reward_sum = 0
