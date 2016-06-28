@@ -39,7 +39,7 @@ def policy_backward(eph, epdlogp, epdrho):
     dW2 = np.dot(eph.T, epdlogp*epdrho).ravel()
     dh = np.outer(epdlogp*epdrho, model['W2'])
     dh[eph <= 0] = 0 # backpro prelu. if the neuron was inactive, do not change its weight(?)
-    dW1 = np.dot(dh.T, epx) - alpha*np.matrix.sum(model['W1'])
+    dW1 = np.dot(dh.T, epx) - alpha*np.sum(model['W1'])
     return {'W1':dW1, 'W2':dW2}
 
 def discount_rewards(r):
