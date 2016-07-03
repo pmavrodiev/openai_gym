@@ -39,7 +39,7 @@ def prepro(I):
     I[I == 144] = 0 # erase background (background type 1)
     I[I == 109] = 0 # erase background (background type 2)
     I[I != 0] = 1 # everything else (paddles, ball) just set to 1
-    return I
+    return I.astype(np.float).ravel()
 
 """ POLICY GRADIENTS """
 
@@ -144,7 +144,7 @@ while keep_going:
         env.render()
 
     # preprocess (crop) the observation, set input to network to be difference image
-    cur_x = prepro(observation).astype(np.float).ravel()
+    cur_x = prepro(observation)
     x = cur_x - prev_x if prev_x is not None else np.zeros(D)
     prev_x = cur_x
 
