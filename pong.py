@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import numpy as np
 import _pickle as pickle
 import configparser
@@ -111,10 +113,11 @@ logger.info('H:%d,D:%d,batch_size:%d,learning_rate:%f,gamma:%f,decay_rate:%f,res
 
 if resume:
     logger.info("Resuming from a checkpoint")
-    model = pickle.load(open('save.p', 'rb'))
+    model = pickle.load(open('save_memory2.p', 'rb'))
 else:
     model = {}
-    model['W1'] = np.random.randn(H,D) / np.sqrt(D) # "Xavier" initialization
+    # 2*D to accommodate for memory of 2
+    model['W1'] = np.random.randn(H,2*D) / np.sqrt(2*D) # "Xavier" initialization
     model['W2'] = np.random.randn(H) / np.sqrt(H)
     model['frequency_up'] = 0
 
@@ -123,7 +126,9 @@ grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
 # rmsprop memory
 rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() }
 
-prev_x = None # used in computing the difference frame
+x_t1 = None # records frame at time t-1
+x_t2 = None # records frame at time t-2
+tick=1
 xs,hs,dlogps,drhos,drs = [],[],[],[],[]
 running_reward = None
 reward_sum = 0
@@ -145,8 +150,16 @@ while keep_going:
 
     # preprocess (crop) the observation, set input to network to be difference image
     cur_x = prepro(observation)
-    x = cur_x - prev_x if prev_x is not None else np.zeros(D)
-    prev_x = cur_x
+    #
+    if x_t1 is None:
+        x = np.zeros(2*D)
+    elif x_t2 is None:
+        x = np.concatenate((cur_x - x_t1, np.zeros(D)))
+    else:
+        x = np.concatenate((cur_x - x_t1, x_t1 - x_t2))
+
+    x_t2 = None if x_t1 is None else x_t1
+    x_t1 = cur_x
 
     # forward the policy network and sample an action from the returned probability
     # aprob is the probability of going UP
@@ -212,14 +225,14 @@ while keep_going:
         # boring book-keeping
         if episode_number % 1000 == 0:
             logger.info("Writing model to file, episode %d",episode_number)
-            pickle.dump(model, open('save_'+str(episode_number)+'.p', 'wb'))
+            pickle.dump(model, open('save_'+str(episode_number)+'_memory2.p', 'wb'))
 
         running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
         logger.info('Resetting env. episode total/mean reward, up frequency and sum(W1): %f \t %f \t %f \t %f',
                     reward_sum, running_reward,model['frequency_up'],np.sum(model['W1']))
         reward_sum = 0
         observation = env.reset() # reset env
-        prev_x = None
+        x_t1 = None
 
         if reward == 1 or reward == -1:
             logger.info('ep %d finished, reward: %f', episode_number, reward)
