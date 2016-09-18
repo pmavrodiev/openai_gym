@@ -8,6 +8,9 @@ import logging
 import logging.handlers
 import gzip
 import sys
+import lasagne
+import theano
+import theano.tensor as T
 
 
 """ AUXILLIARY FUNCTIONS """
@@ -56,10 +59,8 @@ def policy_backward(eph, epdlogp, epdrho):
     """ backward pass. (eph is array of intermediate hidden states) """
     dW2 = np.dot(eph.T, epdlogp*epdrho).ravel()
     dh = np.outer(epdlogp*epdrho, model['W2'])
-    dh[eph <= 0] = 0 # backpro prelu. if the neuron was inactive, do not change its weight(?)
+    dh[eph <= 0] = 0 # backpro prelu. force sparsity
     dW1 = np.dot(dh.T, epx) - alpha*model['W1']
-    # print("%f\t%f"%(np.sum(model['W1']),np.sum(dW1)))
-    # print(dW1)
     return {'W1':dW1, 'W2':dW2}
 
 def discount_rewards(r):
@@ -126,9 +127,7 @@ grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
 # rmsprop memory
 rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() }
 
-x_t1 = None # records frame at time t-1
-x_t2 = None # records frame at time t-2
-tick=1
+prev_x = None # used in computing the difference frame
 xs,hs,dlogps,drhos,drs = [],[],[],[],[]
 running_reward = None
 reward_sum = 0
@@ -141,6 +140,41 @@ env = gym.make("Pong-v0")
 observation = env.reset()
 action_space = {'UP': 2, 'DOWN': 3}
 
+""" BUILD THE CONV NET https://github.com/Lasagne/Lasagne"""
+
+def build_convnet(params, input_var=None, ):
+    convnet = lasagne.layers.InputLayer(shape=(params["batchsize"],params["channels"],params["rows"],params["cols"]),
+                                     input_var=input_var)
+    # 1st convolution layer.
+    # Example params for input size 80x80:  32 filters, (4x4) filter size, stride = 4, no padding
+    # will result in 20x20 output - (80 - 4) / 4 + 1 = 20 - for each of the 32 filters
+    convnet = lasagne.layers.Conv2DLayer(convnet, num_filters = params["filters_cnn_h1"],
+                                         filter_size = params["filtersize_cnn_h1"],
+                                         stride = params["stride_cnn_h1"],
+                                         nonlinearity=lasagne.nonlinearities.rectify,
+                                         W=lasagne.init.GlorotUniform(),
+                                         b=lasagne.init.Constant(0.))
+    # 2nd convolution layer
+    # Example params for input size 20x20x32: 64 filters, (2x2) filter size, stride = 2, no padding
+    # will result in 10x10 - (20 - 2) / 2 + 1 - for each of the 64 filters
+    # hence final output is 10x10x64
+    convnet = lasagne.layers.Conv2DLayer(convnet, num_filters = params["filters_cnn_h2"],
+                                         filter_size = params["filtersize_cnn_h2"],
+                                         stride = params["stride_cnn_h2"],
+                                         nonlinearity=lasagne.nonlinearities.rectify,
+                                         W=lasagne.init.GlorotUniform(),
+                                         b=lasagne.init.Constant(0.))
+    # The final output layer
+    # Example params: 3 output units for each of the 3 possible actions - UP, DOWN, NOOP
+    convnet = lasagne.layers.DenseLayer(num_units = params["num_units_cnn_out"],
+                                        nonlinearity = lasagne.nonlinearities.softmax)
+
+    return convnet
+
+
+
+
+
 """ MAIN LOOP """
 
 keep_going = True
@@ -150,16 +184,9 @@ while keep_going:
 
     # preprocess (crop) the observation, set input to network to be difference image
     cur_x = prepro(observation)
-    #
-    if x_t1 is None:
-        x = np.zeros(2*D)
-    elif x_t2 is None:
-        x = np.concatenate((cur_x - x_t1, np.zeros(D)))
-    else:
-        x = np.concatenate((cur_x - x_t1, x_t1 - x_t2))
+    x = cur_x - prev_x if prev_x is not None else np.zeros(D)
+    prev_x = cur_x
 
-    x_t2 = None if x_t1 is None else x_t1
-    x_t1 = cur_x
 
     # forward the policy network and sample an action from the returned probability
     # aprob is the probability of going UP
@@ -173,7 +200,7 @@ while keep_going:
     drhos.append(dsigmoid(rho)) # the first derivative of the sigmoid activation function at rho
     y = 1 if action == action_space['UP'] else 0 # take an action
     n_actions += 1
-    model['frequency_up'] = (y + (n_actions-1)*model['frequency_up']) / n_actions
+
 
     """
      grad that encourages the action that was taken to be taken
