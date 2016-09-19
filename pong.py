@@ -8,34 +8,14 @@ import logging
 import logging.handlers
 import gzip
 import sys
+import random
 import lasagne
 import theano
 import theano.tensor as T
 
+from helpers import *
 
-""" AUXILLIARY FUNCTIONS """
-# sigmoid "squashing" function to interval [0,1]
-def sigmoid(x):
-    with np.errstate(all='raise'):
-        try:
-            rv = 1.0 / (1.0 + np.exp(-x))
-        except FloatingPointError:
-            pickle.dump(model, open('save_err.p', 'wb'))
-            logger.error('sigmoid(x): Floating point error because of %f',x)
-            sys.exit(1)
-    return rv
 
-# this is the derivative of sigmoid
-def dsigmoid(x):
-    with np.errstate(over='raise'):
-        try:
-            ex = np.exp(x)
-            rv = ex / ((ex + 1.0)**2.0)
-        except FloatingPointError:
-            pickle.dump(model, open('save_err.p', 'wb'))
-            logger.error('dsigmoid(x): Floating point error because of %f',x)
-            sys.exit(1)
-    return rv
 
 def prepro(I):
     """ prepro 210x160x3 uint8 frame into 6400 (80x80) 1D float vector """
@@ -44,35 +24,8 @@ def prepro(I):
     I[I == 144] = 0 # erase background (background type 1)
     I[I == 109] = 0 # erase background (background type 2)
     I[I != 0] = 1 # everything else (paddles, ball) just set to 1
-    return I.astype(np.float).ravel()
+    return I.astype(np.uint8)
 
-""" POLICY GRADIENTS """
-
-def policy_forward(x):
-    h = np.dot(model['W1'], x)
-    h[h <= 0] = 0 # ReLU nonlinearity no inhibitory neurons
-    rho = np.dot(model['W2'], h)
-    p = sigmoid(rho)
-    return rho, p, h # return probability of taking action 2, and hidden state
-
-def policy_backward(eph, epdlogp, epdrho):
-    """ backward pass. (eph is array of intermediate hidden states) """
-    dW2 = np.dot(eph.T, epdlogp*epdrho).ravel()
-    dh = np.outer(epdlogp*epdrho, model['W2'])
-    dh[eph <= 0] = 0 # backpro prelu. force sparsity
-    dW1 = np.dot(dh.T, epx) - alpha*model['W1']
-    return {'W1':dW1, 'W2':dW2}
-
-def discount_rewards(r):
-    """ take 1D float array of rewards and compute discounted reward """
-    discounted_r = np.zeros_like(r)
-    running_add = 0
-    for t in reversed(range(0, r.size)):
-        if r[t] != 0:
-            running_add = 0 # reset the sum, since this was a game boundary (pong specific!)
-        running_add = running_add * gamma + r[t]
-        discounted_r[t] = running_add
-    return discounted_r
 
 """ SET-UP """
 
@@ -90,59 +43,65 @@ fhandler.setFormatter(formatter)
 fhandler.setLevel(flogging_level)
 
 logger = logging.getLogger('PONG')
-logger.setLevel(flogging_level)
+logger.setLevel(logging_level)
 logger.addHandler(shandler)
 logger.addHandler(fhandler)
 
 ### hyperparameters
 config = configparser.ConfigParser()
 config.read('config.properties')
-H = int(config['NEURAL_NETWORK']['number_neurons']) # number of hidden layer neurons
-batch_size = int(config['NEURAL_NETWORK']['batch_size']) # every how many episodes (games) to do a param update?
-learning_rate = float(config['NEURAL_NETWORK']['learning_rate'])
-gamma = float(config['NEURAL_NETWORK']['gamma']) # discount factor for reward
-alpha = float(config['NEURAL_NETWORK']['alpha']) # L2 regularization
 decay_rate = float(config['NEURAL_NETWORK']['decay_rate']) # decay factor for RMSProp leaky sum of grad^2
 resume = config['NEURAL_NETWORK']['resume'].lower() == 'true' # resume from previous checkpoint?
-render = config['NEURAL_NETWORK']['render'].lower() == 'true'
-# number of pixels
-D = int(config['NEURAL_NETWORK']['x']) # input dimensionality: 80x80 grid
+params = {}
+params["batchsize"] = None if config['NEURAL_NETWORK']['batchsize'].lower() == "none" else int(config['NEURAL_NETWORK']['batchsize'])
+params["channels"] = int(config['NEURAL_NETWORK']['channels'])
+params["rows"] = int(config['NEURAL_NETWORK']['rows'])
+params["cols"] = int(config['NEURAL_NETWORK']['cols'])
+params["discount_rewards"] = float(config['NEURAL_NETWORK']['discount_rewards'])
+params["filters_cnn_h1"] = int(config['NEURAL_NETWORK']['filters_cnn_h1'])
+params["filtersize_cnn_h1"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h1'])
+params["stride_cnn_h1"] = int(config['NEURAL_NETWORK']['stride_cnn_h1'])
+params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
+params["filtersize_cnn_h2"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h2'])
+params["stride_cnn_h2"] = int(config['NEURAL_NETWORK']['stride_cnn_h2'])
+params["num_units_cnn_out"] = int(config['NEURAL_NETWORK']['num_units_cnn_out'])
+params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
+params["minibatchsize"] = int(config['NEURAL_NETWORK']['minibatchsize'])
+params["memory_size"] = int(config['NEURAL_NETWORK']['memory_size'])
+params["update_frequency"] = int(config['NEURAL_NETWORK']['update_frequency'])
+params["discount_factor"] = float(config['NEURAL_NETWORK']['discount_factor'])
+learning_rate = float(config['NEURAL_NETWORK']['learning_rate'])
+replay_start_size = float(config['NEURAL_NETWORK']['replay_start_size'])
+epsilon_start = float(config['NEURAL_NETWORK']['epsilon_start'])
+epsilon_end = float(config['NEURAL_NETWORK']['epsilon_end'])
+epsilon_frame_exploration = float(config['NEURAL_NETWORK']['epsilon_frame_exploration'])
 
-# log the configs
-logger.info('H:%d,D:%d,batch_size:%d,learning_rate:%f,gamma:%f,decay_rate:%f,resume:%s,render:%s',
-           H,D,batch_size,learning_rate,gamma,decay_rate,resume,render)
 
-if resume:
-    logger.info("Resuming from a checkpoint")
-    model = pickle.load(open('save_memory2.p', 'rb'))
-else:
-    model = {}
-    # 2*D to accommodate for memory of 2
-    model['W1'] = np.random.randn(H,2*D) / np.sqrt(2*D) # "Xavier" initialization
-    model['W2'] = np.random.randn(H) / np.sqrt(H)
-    model['frequency_up'] = 0
+for k in params.keys():
+    logger.debug(k + " --> " + str(params[k]))
 
 # update buffers that add up gradients over a batch
-grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
+# grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
 # rmsprop memory
-rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() }
+# rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() }
 
 prev_x = None # used in computing the difference frame
 xs,hs,dlogps,drhos,drs = [],[],[],[],[]
-running_reward = None
+running_reward = 0
 reward_sum = 0
-episode_number = 0
+n_episode= 0
 n_frames = 0 # number of frames in an episode
-n_actions = 0 # total number of actions taken for the entire learning process
+n_frames_episode = 0 # number of frames in the current episode
 
 #
 env = gym.make("Pong-v0")
 observation = env.reset()
-action_space = {'UP': 2, 'DOWN': 3}
+action_space = {0:(0,'NOOP'), 1:(2,'UP'), 2:(3,'DOWN')}
 
 """ BUILD THE CONV NET https://github.com/Lasagne/Lasagne"""
 
 def build_convnet(params, input_var=None, ):
+    # example input: shape=(None, 1, 80, 80)
     convnet = lasagne.layers.InputLayer(shape=(params["batchsize"],params["channels"],params["rows"],params["cols"]),
                                      input_var=input_var)
     # 1st convolution layer.
@@ -152,7 +111,7 @@ def build_convnet(params, input_var=None, ):
                                          filter_size = params["filtersize_cnn_h1"],
                                          stride = params["stride_cnn_h1"],
                                          nonlinearity=lasagne.nonlinearities.rectify,
-                                         W=lasagne.init.GlorotUniform(),
+                                         W=lasagne.init.GlorotUniform(gain="relu"),
                                          b=lasagne.init.Constant(0.))
     # 2nd convolution layer
     # Example params for input size 20x20x32: 64 filters, (2x2) filter size, stride = 2, no padding
@@ -162,60 +121,110 @@ def build_convnet(params, input_var=None, ):
                                          filter_size = params["filtersize_cnn_h2"],
                                          stride = params["stride_cnn_h2"],
                                          nonlinearity=lasagne.nonlinearities.rectify,
-                                         W=lasagne.init.GlorotUniform(),
+                                         W=lasagne.init.GlorotUniform(gain="relu"),
                                          b=lasagne.init.Constant(0.))
     # The final output layer
     # Example params: 3 output units for each of the 3 possible actions - UP, DOWN, NOOP
-    convnet = lasagne.layers.DenseLayer(num_units = params["num_units_cnn_out"],
-                                        nonlinearity = lasagne.nonlinearities.softmax)
+    convnet = lasagne.layers.DenseLayer(convnet, num_units = params["num_units_cnn_out"],
+                                        nonlinearity = lasagne.nonlinearities.rectify,
+                                        W=lasagne.init.GlorotUniform(gain="relu"),
+                                        b=lasagne.init.Constant(0.))
 
     return convnet
 
 
 
-
-
 """ MAIN LOOP """
 
+input_var = T.tensor4("inputs")
+input_shape = (-1,1,params["rows"],params["cols"])
 keep_going = True
-while keep_going:
-    if render:
-        env.render()
+Q = build_convnet(params, input_var)
+Qhat = Q
+actions_history = np.zeros(shape=params["memory_size"])
+rewards_history = np.zeros(shape=params["memory_size"])
+state_history = np.zeros(shape=(params["memory_size"], params["rows"]*params["cols"]))
+history_counter = 0
 
+
+while keep_going:
+    n_frames = n_frames+1
+    n_frames_episode = n_frames_episode + 1
     # preprocess (crop) the observation, set input to network to be difference image
+    # reshape convention (examples, channels, rows, columns)
     cur_x = prepro(observation)
-    x = cur_x - prev_x if prev_x is not None else np.zeros(D)
+    x = cur_x - prev_x if prev_x is not None else np.zeros(params["rows"]*params["cols"])
     prev_x = cur_x
 
+    # forward pass
+    # the Q values of all actions given current state s
+    Q_s_a = theano.function([input_var],lasagne.layers.get_output(Q))(x.reshape(input_shape))
+    print(Q_s_a)
+    # print(Q_s_a[0].argmax())
+    Q_s_a_max_idx = np.argwhere(Q_s_a[0] == max(Q_s_a[0])).flatten()
+    # print(Q_s_a_max_idx)
+    random_action_idx = random.sample(list(Q_s_a_max_idx),1)[0]
+    action = action_space[Q_s_a_max_idx[0]] if len(Q_s_a_max_idx) == 1 else action_space[random_action_idx]
+    print(action[1])
 
-    # forward the policy network and sample an action from the returned probability
-    # aprob is the probability of going UP
-    rho, aprob, h = policy_forward(x)
-    # UP = 2, DOWN = 3
-    action = action_space['UP'] if np.random.uniform() < aprob else action_space['DOWN'] # roll the dice!
+    # store the current state and action
+    state_history[history_counter,:] = x.reshape(params["rows"]*params["cols"])
+    actions_history[history_counter] = action[0]
 
-    # record various intermediates (needed later for backprop)
-    xs.append(x) # observation
-    hs.append(h) # hidden state
-    drhos.append(dsigmoid(rho)) # the first derivative of the sigmoid activation function at rho
-    y = 1 if action == action_space['UP'] else 0 # take an action
-    n_actions += 1
+    # step the environment and get new measurements
+    observation, reward, done, info = env.step(action[0])
+
+    running_reward = running_reward + reward
+    print("Running reward " + str(running_reward))
+
+    rewards_history[history_counter] = reward
+    history_counter = (history_counter + 1) % params["memory_size"]
+
+    # an episode finished, i.e. score up to 21 for either player
+    if done:
+        n_episode = n_episode + 1
+        print(history_counter)
+        print(n_frames_episode)
+        # discount the rewards for the last episode only
+        discounted_epr = discount_rewards(rewards_history[(history_counter-n_frames_episode):history_counter],
+                                          gamma=params["discount_rewards"])
+        # standardize the rewards to be unit normal (helps control the gradient estimator variance)
+        print(discounted_epr)
+        discounted_epr -= np.mean(discounted_epr)
+        discounted_epr /= np.std(discounted_epr)
+
+        # update the history
+        rewards_history[(history_counter-n_frames_episode):history_counter] = discounted_epr
+        n_frames_episode = 0
+        keep_going=False
+        observation = env.reset() # reset env
+
+    # perform param update on a random minibatch sampled from the history
+    if n_frames > params["memory_size"]:
+        # history is full - sample from all of it
+        minibatch_indeces = random.sample(range(params["memory_size"]),params["minibatchsize"])
+    else:
+        # sample up until the recorded history
+        minibatch_indeces = random.sample(range(n_frames),params["minibatchsize"])
+
+    # do the parameter updates
 
 
     """
      grad that encourages the action that was taken to be taken
      (see http://cs231n.github.io/neural-networks-2/#losses if confused)
     """
-    dlogps.append(y - aprob)
+    # dlogps.append(y - aprob)
 
     # step the environment and get new measurements
-    observation, reward, done, info = env.step(action)
-    reward_sum += reward
+    # observation, reward, done, info = env.step(action)
+    # reward_sum += reward
 
-    drs.append(reward) # record reward (has to be done after we call step() to get reward for previous action)
-    n_frames += 1
+    # drs.append(reward) # record reward (has to be done after we call step() to get reward for previous action)
+    # n_frames += 1
 
-    if done: # an episode finished, i.e. score up to 21 for either player
+    """
+
         logger.info('Finished episode %d with %d frames.', episode_number, n_frames)
         episode_number += 1
         n_frames = 0
@@ -265,3 +274,4 @@ while keep_going:
             logger.info('ep %d finished, reward: %f', episode_number, reward)
         else:
             logger.error('ep %d finished, but received invalid reward: %f !!!', episode_number, reward)
+    """
