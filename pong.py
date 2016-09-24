@@ -2,7 +2,7 @@
 
 import numpy as np
 import _pickle as pickle
-import configparser
+
 import gym
 import logging
 import logging.handlers
@@ -47,56 +47,12 @@ logger.setLevel(logging_level)
 logger.addHandler(shandler)
 logger.addHandler(fhandler)
 
-### hyperparameters
-config = configparser.ConfigParser()
-config.read('config.properties')
-decay_rate = float(config['NEURAL_NETWORK']['decay_rate']) # decay factor for RMSProp leaky sum of grad^2
-resume = config['NEURAL_NETWORK']['resume'].lower() == 'true' # resume from previous checkpoint?
-params = {}
-params["batchsize"] = None if config['NEURAL_NETWORK']['batchsize'].lower() == "none" else int(config['NEURAL_NETWORK']['batchsize'])
-params["channels"] = int(config['NEURAL_NETWORK']['channels'])
-params["rows"] = int(config['NEURAL_NETWORK']['rows'])
-params["cols"] = int(config['NEURAL_NETWORK']['cols'])
-params["discount_rewards"] = float(config['NEURAL_NETWORK']['discount_rewards'])
-params["filters_cnn_h1"] = int(config['NEURAL_NETWORK']['filters_cnn_h1'])
-params["filtersize_cnn_h1"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h1'])
-params["stride_cnn_h1"] = int(config['NEURAL_NETWORK']['stride_cnn_h1'])
-params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
-params["filtersize_cnn_h2"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h2'])
-params["stride_cnn_h2"] = int(config['NEURAL_NETWORK']['stride_cnn_h2'])
-params["num_units_cnn_out"] = int(config['NEURAL_NETWORK']['num_units_cnn_out'])
-params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
-params["minibatchsize"] = int(config['NEURAL_NETWORK']['minibatchsize'])
-params["memory_size"] = int(config['NEURAL_NETWORK']['memory_size'])
-params["update_frequency"] = int(config['NEURAL_NETWORK']['update_frequency'])
-params["discount_factor"] = float(config['NEURAL_NETWORK']['discount_factor'])
-learning_rate = float(config['NEURAL_NETWORK']['learning_rate'])
-replay_start_size = float(config['NEURAL_NETWORK']['replay_start_size'])
-epsilon_start = float(config['NEURAL_NETWORK']['epsilon_start'])
-epsilon_end = float(config['NEURAL_NETWORK']['epsilon_end'])
-epsilon_frame_exploration = float(config['NEURAL_NETWORK']['epsilon_frame_exploration'])
-
+# parse config
+params = parse_config('config.properties')
 
 for k in params.keys():
     logger.debug(k + " --> " + str(params[k]))
 
-# update buffers that add up gradients over a batch
-# grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
-# rmsprop memory
-# rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() }
-
-prev_x = None # used in computing the difference frame
-xs,hs,dlogps,drhos,drs = [],[],[],[],[]
-running_reward = 0
-reward_sum = 0
-n_episode= 0
-n_frames = 0 # number of frames in an episode
-n_frames_episode = 0 # number of frames in the current episode
-
-#
-env = gym.make("Pong-v0")
-observation = env.reset()
-action_space = {0:(0,'NOOP'), 1:(2,'UP'), 2:(3,'DOWN')}
 
 """ BUILD THE CONV NET https://github.com/Lasagne/Lasagne"""
 
@@ -125,31 +81,66 @@ def build_convnet(params, input_var=None, ):
                                          b=lasagne.init.Constant(0.))
     # The final output layer
     # Example params: 3 output units for each of the 3 possible actions - UP, DOWN, NOOP
+    # The convention is the same as action_space, i.e.:
+    # : output[0] = NOOP, output[1] = UP, output[2] = DOWN
     convnet = lasagne.layers.DenseLayer(convnet, num_units = params["num_units_cnn_out"],
-                                        nonlinearity = lasagne.nonlinearities.rectify,
+                                        nonlinearity = lasagne.nonlinearities.linear,
                                         W=lasagne.init.GlorotUniform(gain="relu"),
                                         b=lasagne.init.Constant(0.))
 
     return convnet
 
 
+def select_action(q_vals_actions, T=1):
+    """
+        Select an action according to the Boltzmann probability distribution
+    """
+    total_mass = np.sum(np.exp(q_vals_actions / T))
+    probs = np.exp(q_vals_actions / T ) / total_mass
+    return np.random.choice(q_vals_actions, p = probs)
 
-""" MAIN LOOP """
 
+prev_x = None # used in computing the difference frame
+
+running_reward = 0
+reward_sum = 0
+n_episode= 0
+# total number of frames to train
+n_total_frames = 10**6
+# number of total frames elapsed since the beginning of the game
+n_frames = 0
+# number of frames in the current episode
+n_frames_episode = 0
+#
 input_var = T.tensor4("inputs")
+target_var = T.tensor3("target_var")
+prediction = T.tensor3("target_var")
 input_shape = (-1,1,params["rows"],params["cols"])
-keep_going = True
 Q = build_convnet(params, input_var)
-Qhat = Q
+#
+action_space = {0:(0,'NOOP'), 1:(2,'UP'), 2:(3,'DOWN')}
+history_counter = 0
 actions_history = np.zeros(shape=params["memory_size"])
 rewards_history = np.zeros(shape=params["memory_size"])
 state_history = np.zeros(shape=(params["memory_size"], params["rows"]*params["cols"]))
-history_counter = 0
+q_history = np.zeros(shape=(params["memory_size"], len(action_space)))
 
+# prediction =  lasagne.layers.get_output(Q)
+loss = lasagne.objectives.squared_error(prediction, target_var)
+#loss = loss.mean() # take the mean over the minibatch
+parameters = lasagne.layers.get_all_params(Q, trainable=True)
+updates = lasagne.updates.rmsprop(loss, parameters, learning_rate=params['learning_rate'],
+                                  rho=params["decay_rate"])
+#
+train_fn = theano.function([input_var, target_var], loss, updates=updates)
+train_error = 0
+#
+env = gym.make("Pong-v0")
+observation = env.reset()
 
-while keep_going:
-    n_frames = n_frames+1
-    n_frames_episode = n_frames_episode + 1
+""" MAIN LOOP """
+running_reward = 0
+while n_frames < n_total_frames:
     # preprocess (crop) the observation, set input to network to be difference image
     # reshape convention (examples, channels, rows, columns)
     cur_x = prepro(observation)
@@ -157,121 +148,85 @@ while keep_going:
     prev_x = cur_x
 
     # forward pass
-    # the Q values of all actions given current state s
-    Q_s_a = theano.function([input_var],lasagne.layers.get_output(Q))(x.reshape(input_shape))
-    print(Q_s_a)
-    # print(Q_s_a[0].argmax())
-    Q_s_a_max_idx = np.argwhere(Q_s_a[0] == max(Q_s_a[0])).flatten()
-    # print(Q_s_a_max_idx)
-    random_action_idx = random.sample(list(Q_s_a_max_idx),1)[0]
-    action = action_space[Q_s_a_max_idx[0]] if len(Q_s_a_max_idx) == 1 else action_space[random_action_idx]
-    print(action[1])
+    # get the Q values of all actions given current state x
+    Q_x_a = theano.function([input_var],lasagne.layers.get_output(Q))(x.reshape(input_shape))
 
-    # store the current state and action
+    action = select_action(Q_x_a[0], T = 1)
+    # map the action, which is simply the index of the selected Q output
+    # to the action space of the simulator
+    sim_action = action_space[action[0]]
+
+    # update the q values, state and actions history
+    q_history[history_counter,:] = Q_x_a[0]
     state_history[history_counter,:] = x.reshape(params["rows"]*params["cols"])
-    actions_history[history_counter] = action[0]
+    actions_history[history_counter] = action
 
     # step the environment and get new measurements
-    observation, reward, done, info = env.step(action[0])
-
-    running_reward = running_reward + reward
-    print("Running reward " + str(running_reward))
+    observation, reward, done, info = env.step(sim_action)
+    running_reward += reward
 
     rewards_history[history_counter] = reward
+
+    n_frames += 1
+    n_frames_episode += 1
+
+    logger.info("[n_frame %d, episode %d, n_frames_episode %d]: action %s, reward %d",
+                n_frames, n_episode, n_frames_episode, action_space[action[1]], reward)
+
+
+    logger.debug("history_counter %d, memory_size %d", history_counter, params["memory_size"])
     history_counter = (history_counter + 1) % params["memory_size"]
 
     # an episode finished, i.e. score up to 21 for either player
     if done:
+        logger.info("\nepisode %d finished, cumulative reward %d", n_episode, running_reward)
+        logger.debug("[n_frame %d, n_frames_episode %d, history_counter %d]",
+                    n_frames, n_frames_episode, history_counter)
         n_episode = n_episode + 1
-        print(history_counter)
-        print(n_frames_episode)
         # discount the rewards for the last episode only
-        discounted_epr = discount_rewards(rewards_history[(history_counter-n_frames_episode):history_counter],
+        # TODO: when history_counter loops over memorysize this subtraction may fail
+        start = history_counter-n_frames_episode
+        discounted_epr = discount_rewards(rewards_history[start:history_counter],
                                           gamma=params["discount_rewards"])
         # standardize the rewards to be unit normal (helps control the gradient estimator variance)
-        print(discounted_epr)
         discounted_epr -= np.mean(discounted_epr)
         discounted_epr /= np.std(discounted_epr)
 
         # update the history
-        rewards_history[(history_counter-n_frames_episode):history_counter] = discounted_epr
+        rewards_history[start:history_counter] = discounted_epr
+
+        """
+        the last action occured at index history_counter, update its Q-value to either -1 or 1
+        the Q values of all other actions taken in previous steps will be similarly fixed to
+        the discounted rewards in discounted_epr.
+        The Q values of non-taken actions in all previous steps remain as they are
+
+        e.g. last_action = NOOP =>  q_history = [NOOP, UP, DOWN] = [FIX, Qhat, Qhat]
+        q_historyp[[row_indeces],[column_indeces]]
+
+        """
+        q_history[start:history_counter, actions_history[start:history_counter]] = discounted_epr
+
         n_frames_episode = 0
-        keep_going=False
         observation = env.reset() # reset env
 
-    # perform param update on a random minibatch sampled from the history
-    if n_frames > params["memory_size"]:
-        # history is full - sample from all of it
-        minibatch_indeces = random.sample(range(params["memory_size"]),params["minibatchsize"])
-    else:
-        # sample up until the recorded history
-        minibatch_indeces = random.sample(range(n_frames),params["minibatchsize"])
+    # UPDATE
+    if  n_episode > 0 and n_episode % params["update_frequency"] == 0 :
 
-    # do the parameter updates
-
-
-    """
-     grad that encourages the action that was taken to be taken
-     (see http://cs231n.github.io/neural-networks-2/#losses if confused)
-    """
-    # dlogps.append(y - aprob)
-
-    # step the environment and get new measurements
-    # observation, reward, done, info = env.step(action)
-    # reward_sum += reward
-
-    # drs.append(reward) # record reward (has to be done after we call step() to get reward for previous action)
-    # n_frames += 1
-
-    """
-
-        logger.info('Finished episode %d with %d frames.', episode_number, n_frames)
-        episode_number += 1
-        n_frames = 0
-        # stack together all inputs, hidden states, action gradients, and rewards for this episode
-        epx = np.vstack(xs)
-        eph = np.vstack(hs)
-        epdlogp = np.vstack(dlogps)
-        epdrho = np.vstack(drhos)
-        epr = np.vstack(drs)
-        xs,hs,dlogps,drhos,drs = [],[],[],[],[] # reset array memory
-
-        # compute the discounted reward backwards through time
-        discounted_epr = discount_rewards(epr)
-        # standardize the rewards to be unit normal (helps control the gradient estimator variance)
-        discounted_epr -= np.mean(discounted_epr)
-        discounted_epr /= np.std(discounted_epr)
-
-        epdlogp *= discounted_epr # modulate the gradient with advantage (PG magic happens right here.)
-        grad = policy_backward(eph, epdlogp, epdrho)
-
-        grad_buffer['W1'] += grad['W1'] # accumulate grad over batch
-        grad_buffer['W2'] += grad['W2'] # accumulate grad over batch
-
-        # perform rmsprop parameter update every batch_size episodes
-        if episode_number % batch_size == 0:
-            logger.info('Performing param update')
-            print(grad_buffer['W1'])
-            for k in ['W1','W2']:
-                g = grad_buffer[k] # gradient
-                rmsprop_cache[k] = decay_rate * rmsprop_cache[k] + (1 - decay_rate) * g**2
-                model[k] += learning_rate * g / (np.sqrt(rmsprop_cache[k]) + 1e-5)
-                grad_buffer[k] = np.zeros_like(model[k]) # reset batch gradient buffer
-
-        # boring book-keeping
-        if episode_number % 1000 == 0:
-            logger.info("Writing model to file, episode %d",episode_number)
-            pickle.dump(model, open('save_'+str(episode_number)+'_memory2.p', 'wb'))
-
-        running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
-        logger.info('Resetting env. episode total/mean reward, up frequency and sum(W1): %f \t %f \t %f \t %f',
-                    reward_sum, running_reward,model['frequency_up'],np.sum(model['W1']))
-        reward_sum = 0
-        observation = env.reset() # reset env
-        x_t1 = None
-
-        if reward == 1 or reward == -1:
-            logger.info('ep %d finished, reward: %f', episode_number, reward)
+        # perform param update on a random minibatch sampled from the history
+        if n_frames > params["memory_size"]:
+            # history is full - sample from all of it
+            minibatch_indeces = random.sample(range(params["memory_size"]),params["minibatchsize"])
         else:
-            logger.error('ep %d finished, but received invalid reward: %f !!!', episode_number, reward)
-    """
+            # sample up until the recorded history
+            minibatch_indeces = random.sample(range(n_frames),params["minibatchsize"])
+
+        # sample inputs and targets
+        inputs = state_history[minibatch_indeces,:].reshape(input_shape)
+        targets = q_history[minibatch_indeces,:].reshape(input_shape)
+
+        train_error += train_fn(inputs, targets)
+        logger.info("Training error %f", train_error)
+
+
+

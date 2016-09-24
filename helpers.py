@@ -1,4 +1,5 @@
 import numpy as np
+import configparser
 
 """ AUXILLIARY FUNCTIONS """
 
@@ -18,3 +19,33 @@ def discount_rewards(r, gamma):
         discounted_r[t] = running_add
     return discounted_r
 
+def parse_config(file):
+    config = configparser.ConfigParser()
+    config.read(file)
+    params = {}
+    # decay factor for RMSProp
+    params["decay_rate"] = float(config['NEURAL_NETWORK']['decay_rate'])
+    params["batchsize"] = None if config['NEURAL_NETWORK']['batchsize'].lower() == "none" else int(config['NEURAL_NETWORK']['batchsize'])
+    params["channels"] = int(config['NEURAL_NETWORK']['channels'])
+    params["rows"] = int(config['NEURAL_NETWORK']['rows'])
+    params["cols"] = int(config['NEURAL_NETWORK']['cols'])
+    params["discount_rewards"] = float(config['NEURAL_NETWORK']['discount_rewards'])
+    params["filters_cnn_h1"] = int(config['NEURAL_NETWORK']['filters_cnn_h1'])
+    params["filtersize_cnn_h1"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h1'])
+    params["stride_cnn_h1"] = int(config['NEURAL_NETWORK']['stride_cnn_h1'])
+    params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
+    params["filtersize_cnn_h2"] = int(config['NEURAL_NETWORK']['filtersize_cnn_h2'])
+    params["stride_cnn_h2"] = int(config['NEURAL_NETWORK']['stride_cnn_h2'])
+    params["num_units_cnn_out"] = int(config['NEURAL_NETWORK']['num_units_cnn_out'])
+    params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
+    params["minibatchsize"] = int(config['NEURAL_NETWORK']['minibatchsize'])
+    params["memory_size"] = int(config['NEURAL_NETWORK']['memory_size'])
+    # update_frequency - every update_frequency episodes update the Q network
+    params["update_frequency"] = int(config['NEURAL_NETWORK']['update_frequency'])
+    params["learning_rate"] = float(config['NEURAL_NETWORK']['learning_rate'])
+    params["replay_start_size"] = float(config['NEURAL_NETWORK']['replay_start_size'])
+    params["epsilon_start"] = float(config['NEURAL_NETWORK']['epsilon_start'])
+    params["epsilon_end"] = float(config['NEURAL_NETWORK']['epsilon_end'])
+    params["epsilon_frame_exploration"] = float(config['NEURAL_NETWORK']['epsilon_frame_exploration'])
+
+    return params
