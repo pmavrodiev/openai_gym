@@ -39,6 +39,8 @@ def parse_config(file):
     params["num_units_cnn_out"] = int(config['NEURAL_NETWORK']['num_units_cnn_out'])
     params["filters_cnn_h2"] = int(config['NEURAL_NETWORK']['filters_cnn_h2'])
     params["minibatchsize"] = int(config['NEURAL_NETWORK']['minibatchsize'])
+    # the number of frames stored as memory size.
+    # alternatively could implement memory as all frames for a given number of completed episodes
     params["memory_size"] = int(config['NEURAL_NETWORK']['memory_size'])
     # update_frequency - every update_frequency episodes update the Q network
     params["update_frequency"] = int(config['NEURAL_NETWORK']['update_frequency'])
